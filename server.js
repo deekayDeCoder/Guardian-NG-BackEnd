@@ -6,12 +6,6 @@ import dotenv from 'dotenv';
 import { requestLogger, errorHandler } from './middleware/errorHandler.js';
 import router from './router.js';
 
-const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
-// const envPath = fs.existsSync(path.resolve(__dirname, '.env'))
-//   ? path.resolve(__dirname, '.env')
-//   : path.resolve(__dirname, '.env.example');
-// dotenv.config({ path: envPath });
-// console.log('Loaded environment variables from', envPath);
 dotenv.config({path: "/.env"})
 
 const app = express();

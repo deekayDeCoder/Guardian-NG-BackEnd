@@ -1,10 +1,13 @@
 import { Router } from 'express';
 import crypto from 'crypto';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
 import { 
   IncidentModel, 
   isDbConnected, 
   mockIncidents, 
-  updateMockIncidents 
+  updateMockIncidents,
+  AdminModel
 } from './db.js';
 import { 
   validateIncidentReport, 
@@ -12,6 +15,41 @@ import {
 } from './middleware/validation.js';
 
 const router = Router();
+
+const JWT_SECRET = process.env.JWT_SECRET || 'guardian_secret_key';
+const TOKEN_EXPIRY = '4h';
+
+const buildAuthResponse = (admin) => ({
+  name: admin.name,
+  email: admin.email,
+  agencyId: admin.agencyId,
+  role: admin.role,
+  token: jwt.sign({ id: admin._id, role: admin.role, email: admin.email }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY })
+});
+
+const authenticateAdmin = async (req, res, next) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace('Bearer ', '').trim();
+
+  if (!token) return res.status(401).json({ success: false, error: 'Missing authorization token' });
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    const admin = await AdminModel.findById(payload.id);
+    if (!admin) return res.status(401).json({ success: false, error: 'Invalid token' });
+    req.admin = admin;
+    next();
+  } catch (err) {
+    return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+  }
+};
+
+const permitManager = (req, res, next) => {
+  if (!req.admin || req.admin.role !== 'manager') {
+    return res.status(403).json({ success: false, error: 'Manager access required' });
+  }
+  next();
+};
 
 // Haversine distance formula to compute distance in meters between two coordinates
 function getHaversineDistance(lon1, lat1, lon2, lat2) {
@@ -244,6 +282,133 @@ router.post('/incidents/report', validateIncidentReport, async (req, res, next) 
 
       return res.status(201).json({ success: true, incident: newIncidentMock });
     }
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/v1/admin/login
+ * Authenticate existing administrator credentials.
+ */
+router.post('/admin/login', async (req, res, next) => {
+  try {
+    const { email, agencyId, password, role } = req.body;
+    if (!email || !agencyId || !password || !role) {
+      return res.status(400).json({ success: false, error: 'Email, agencyId, role, and password are required.' });
+    }
+
+    const admin = await AdminModel.findOne({ email: email.toLowerCase(), agencyId: agencyId.trim() });
+    if (!admin || admin.role !== role) {
+      return res.status(401).json({ success: false, error: 'Invalid administrator credentials or role.' });
+    }
+
+    const passwordMatch = await bcrypt.compare(password, admin.passwordHash);
+    if (!passwordMatch) {
+      return res.status(401).json({ success: false, error: 'Invalid administrator credentials or role.' });
+    }
+
+    return res.json({ success: true, admin: buildAuthResponse(admin) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/v1/admin/profile
+ * Update the current logged-in admin profile fields.
+ */
+router.patch('/admin/profile', authenticateAdmin, async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+    if (!email && !password) {
+      return res.status(400).json({ success: false, error: 'Email or password is required to update profile.' });
+    }
+
+    const update = {};
+    if (email) update.email = email.toLowerCase();
+    if (password) update.passwordHash = await bcrypt.hash(password, 12);
+
+    if (email && email.toLowerCase() !== req.admin.email) {
+      const exists = await AdminModel.findOne({ email: email.toLowerCase() });
+      if (exists) {
+        return res.status(409).json({ success: false, error: 'Email already in use.' });
+      }
+    }
+
+    const updatedAdmin = await AdminModel.findByIdAndUpdate(req.admin._id, update, { new: true });
+    if (!updatedAdmin) {
+      return res.status(404).json({ success: false, error: 'Administrator not found.' });
+    }
+
+    return res.json({ success: true, admin: buildAuthResponse(updatedAdmin) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/v1/admins
+ * Manager-only endpoint listing all administrator accounts.
+ */
+router.get('/admins', authenticateAdmin, permitManager, async (req, res, next) => {
+  try {
+    const admins = await AdminModel.find().select('name email agencyId role createdAt updatedAt');
+    return res.json({ success: true, admins });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/v1/admins
+ * Manager-only endpoint to create new admin accounts.
+ */
+router.post('/admins', authenticateAdmin, permitManager, async (req, res, next) => {
+  try {
+    const { name, email, agencyId, password, role } = req.body;
+    if (!name || !email || !agencyId || !password || !role) {
+      return res.status(400).json({ success: false, error: 'All admin fields are required.' });
+    }
+
+    const existingEmail = await AdminModel.findOne({ email: email.toLowerCase() });
+    if (existingEmail) {
+      return res.status(409).json({ success: false, error: 'An administrator with this email already exists.' });
+    }
+
+    const existingAgency = await AdminModel.findOne({ agencyId: agencyId.trim() });
+    if (existingAgency) {
+      return res.status(409).json({ success: false, error: 'An administrator with this Agency ID already exists.' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    const admin = new AdminModel({ name, email: email.toLowerCase(), agencyId: agencyId.trim(), passwordHash, role });
+    await admin.save();
+
+    return res.status(201).json({ success: true, admin: { name: admin.name, email: admin.email, agencyId: admin.agencyId, role: admin.role } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/v1/admins/:id
+ * Manager-only endpoint to remove an admin account, except system admin and manager default
+ */
+router.delete('/admins/:id', authenticateAdmin, permitManager, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const adminToRemove = await AdminModel.findById(id);
+    if (!adminToRemove) {
+      return res.status(404).json({ success: false, error: 'Administrator not found.' });
+    }
+
+    if (['admin@guardian.gov.ng', 'manager@guardian.gov.ng'].includes(adminToRemove.email)) {
+      return res.status(403).json({ success: false, error: 'System default administrator accounts cannot be removed.' });
+    }
+
+    await AdminModel.findByIdAndDelete(id);
+    return res.json({ success: true, message: 'Administrator removed successfully.' });
   } catch (error) {
     next(error);
   }

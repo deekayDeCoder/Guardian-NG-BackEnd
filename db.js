@@ -1,15 +1,12 @@
 import mongoose, { Schema } from 'mongoose';
 import dotenv from 'dotenv';
+import bcrypt from 'bcrypt';
 import fs from 'fs';
 import path from 'path';
 import url from 'url';
 
-const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
-// const envPath = fs.existsSync(path.resolve(__dirname, '.env'))
-//   ? path.resolve(__dirname, '.env')
-//   : path.resolve(__dirname, '.env.example');
-// dotenv.config({ path: envPath });
-dotenv.config({path: '.env'})
+
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
 const MONGODB_URI = process.env.MONGODB_URI;
 
@@ -17,7 +14,7 @@ const MONGODB_URI = process.env.MONGODB_URI;
 if (MONGODB_URI) {
   mongoose.connect(MONGODB_URI)
     .then(() => {
-      console.log('Successfully connected to MongoDB Atlas!');
+      console.log(`Successfully connected to MongoDB ${process.env.NODE_ENV === 'production' ? 'Atlas' : 'local database'}`);
     })
     .catch((err) => {
       console.error('Error connecting to MongoDB Atlas, enabling resilient mock database fallback.', err);
@@ -77,6 +74,74 @@ try {
 }
 
 export { IncidentModel };
+
+const DEFAULT_ADMIN_USERS = [
+  {
+    name: 'Command Dispatcher',
+    email: 'admin@guardian.gov.ng',
+    agencyId: 'ZMF-CPG-2026',
+    password: 'Secure@Password123',
+    role: 'dispatcher'
+  },
+  {
+    name: 'Guardian Command Manager',
+    email: 'manager@guardian.gov.ng',
+    agencyId: 'ZMF-MGR-2026',
+    password: 'Manager@123',
+    role: 'manager'
+  }
+];
+
+const AdminSchema = new Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, lowercase: true, trim: true, unique: true },
+  agencyId: { type: String, required: true, trim: true, unique: true },
+  passwordHash: { type: String, required: true },
+  role: { type: String, enum: ['dispatcher', 'manager'], required: true },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+AdminSchema.pre('save', function() {
+  this.updatedAt = new Date();
+});
+
+let AdminModel;
+try {
+  AdminModel = mongoose.model('Admin', AdminSchema);
+} catch {
+  AdminModel = mongoose.model('Admin');
+}
+
+export { AdminModel };
+
+const ensureDefaultAdmins = async () => {
+  if (!isDbConnected()) return;
+  try {
+    const existing = await AdminModel.find({
+      email: { $in: DEFAULT_ADMIN_USERS.map((admin) => admin.email.toLowerCase()) }
+    });
+
+    const missingAdmins = DEFAULT_ADMIN_USERS.filter((defaultAdmin) =>
+      !existing.some((admin) => admin.email === defaultAdmin.email.toLowerCase())
+    );
+
+    for (const admin of missingAdmins) {
+      const passwordHash = await bcrypt.hash(admin.password, 12);
+      await new AdminModel({
+        name: admin.name,
+        email: admin.email.toLowerCase(),
+        agencyId: admin.agencyId.trim(),
+        passwordHash,
+        role: admin.role
+      }).save();
+    }
+  } catch (err) {
+    console.error('Failed to seed default admin accounts:', err);
+  }
+};
+
+mongoose.connection.once('open', ensureDefaultAdmins);
 
 // --- RESILIENT IN-MEMORY MOCK DATABASE ---
 // Pure Node JS generator to output a valid 16-bit PCM WAV base64 tactical radio distress signal
