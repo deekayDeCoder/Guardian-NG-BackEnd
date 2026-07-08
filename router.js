@@ -40,15 +40,15 @@ router.get('/incidents', async (req, res, next) => {
       
       // Calculate nearby alerts count dynamically for each DB incident
       const parsedIncidents = await Promise.all(incidents.map(async (inc) => {
-        const coords = inc.location.coordinates;
+        const coords = inc.location.coordinates; // [lng, lat]
+        // Use $geoWithin with $centerSphere since $near is restricted in this context.
+        const earthRadiusMeters = 6371000;
+        const radiusRadians = 2000 / earthRadiusMeters; // 2km in radians
+
         const count = await IncidentModel.countDocuments({
           location: {
-            $near: {
-              $geometry: {
-                type: 'Point',
-                coordinates: coords
-              },
-              $maxDistance: 2000 // 2km
+            $geoWithin: {
+              $centerSphere: [[coords[0], coords[1]], radiusRadians]
             }
           },
           createdAt: { $gte: new Date(Date.now() - 2 * 60 * 60 * 1000) } // Last 2 hours
@@ -108,14 +108,14 @@ router.post('/incidents/report', validateIncidentReport, async (req, res, next) 
 
     if (isDbConnected()) {
       // Query Mongo 2dsphere index for documents within 2km of coordinates
+      // Use $geoWithin + $centerSphere to find documents within radius (2km)
+      const earthRadiusMeters = 6371000;
+      const radiusRadians = 2000 / earthRadiusMeters; // 2km in radians
+
       const nearbyAlerts = await IncidentModel.find({
         location: {
-          $near: {
-            $geometry: {
-              type: 'Point',
-              coordinates: [longitude, latitude] // [long, lat]
-            },
-            $maxDistance: 2000 // 2km (2000m)
+          $geoWithin: {
+            $centerSphere: [[longitude, latitude], radiusRadians]
           }
         },
         createdAt: {

@@ -1,7 +1,15 @@
 import mongoose, { Schema } from 'mongoose';
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
+import url from 'url';
 
-dotenv.config();
+const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
+// const envPath = fs.existsSync(path.resolve(__dirname, '.env'))
+//   ? path.resolve(__dirname, '.env')
+//   : path.resolve(__dirname, '.env.example');
+// dotenv.config({ path: envPath });
+dotenv.config({path: '.env'})
 
 const MONGODB_URI = process.env.MONGODB_URI;
 
